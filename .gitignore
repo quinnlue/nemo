@@ -1,0 +1,13 @@
+# Data
+/data/
+/models/
+
+phonetic_submission.zip
+orthographic_submission.zip
+submission/submission.jsonl
+
+# Mac OS-specific storage files
+.DS_Store
+
+# Environment
+.venv/*
