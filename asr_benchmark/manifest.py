@@ -23,15 +23,18 @@ from asr_benchmark.config import PROJECT_ROOT
 # ── Default dataset IDs ──────────────────────────────────────────────────────
 DATASET_ID = "quinnlue/asr"
 NOISE_ID = "quinnlue/realclass"
+IMPULSE_ID = "quinnlue/rirs"
 
 # ── Output paths ─────────────────────────────────────────────────────────────
 MANIFEST_DIR = PROJECT_ROOT / "data" / "processed" / "ortho_dataset"
 AUDIO_CACHE = MANIFEST_DIR / "audio"
 NOISE_CACHE = MANIFEST_DIR / "noise"
+IMPULSE_CACHE = MANIFEST_DIR / "impulse"
 
 TRAIN_MANIFEST = MANIFEST_DIR / "train_manifest.jsonl"
 VAL_MANIFEST = MANIFEST_DIR / "val_manifest.jsonl"
 NOISE_MANIFEST = MANIFEST_DIR / "noise_manifest.jsonl"
+IMPULSE_MANIFEST = MANIFEST_DIR / "impulse_manifest.jsonl"
 
 
 # ── Internal helpers ─────────────────────────────────────────────────────────
@@ -110,31 +113,35 @@ def _hf_split_to_manifest(
     return len(records)
 
 
-def _noise_to_manifest(
-    noise_dataset,
+def _audio_dataset_to_manifest(
+    dataset,
     manifest_path: Path,
-    noise_cache: Path,
+    cache_dir: Path,
+    *,
+    label: str = "audio",
+    audio_column: str = "audio",
+    uid_prefix: str = "clip",
     max_workers: int = 8,
 ) -> int:
-    """Convert a HuggingFace noise dataset to a NeMo-format noise manifest.
+    """Convert a HuggingFace audio-only dataset to a NeMo-format manifest.
 
-    Each row is expected to have an ``"audio"`` column (dict with ``array``
-    and ``sampling_rate``).  The manifest JSONL contains ``audio_filepath``,
-    ``duration``, and ``offset`` (always 0.0) as required by NeMo's
-    ``AudioAugmentor``.
+    Each row is expected to have an *audio_column* column (dict with
+    ``array`` and ``sampling_rate``).  The manifest JSONL contains
+    ``audio_filepath``, ``duration``, and ``offset`` (always 0.0) as
+    required by NeMo's perturbation augmentors (noise / impulse).
     """
     records: list[dict] = []
     futures: dict = {}
     errors = 0
 
     with ProcessPoolExecutor(max_workers=max_workers) as pool:
-        for idx, row in enumerate(tqdm(noise_dataset, desc="noise (decode)")):
-            uid = f"noise_{idx}"
-            wav_path = noise_cache / f"{uid}.wav"
+        for idx, row in enumerate(tqdm(dataset, desc=f"{label} (decode)")):
+            uid = f"{uid_prefix}_{idx}"
+            wav_path = cache_dir / f"{uid}.wav"
 
             try:
-                array = row["audio"]["array"]
-                sr = row["audio"]["sampling_rate"]
+                array = row[audio_column]["array"]
+                sr = row[audio_column]["sampling_rate"]
             except (RuntimeError, Exception) as e:
                 errors += 1
                 logger.warning(f"Skipping {uid} (decode): {e}")
@@ -152,7 +159,7 @@ def _noise_to_manifest(
                     "offset": 0.0,
                 })
 
-        for fut in tqdm(as_completed(futures), total=len(futures), desc="noise (write)"):
+        for fut in tqdm(as_completed(futures), total=len(futures), desc=f"{label} (write)"):
             uid, wav_path, duration = futures[fut]
             try:
                 fut.result()
@@ -166,7 +173,7 @@ def _noise_to_manifest(
                 logger.warning(f"Skipping {uid} (write): {e}")
 
     logger.info(
-        f"Wrote {len(records)} noise entries to {manifest_path.name} "
+        f"Wrote {len(records)} {label} entries to {manifest_path.name} "
         f"({errors} decode/write errors)"
     )
     pd.DataFrame(records).to_json(manifest_path, orient="records", lines=True)
@@ -181,7 +188,7 @@ def prepare_manifests(
     sample_n: Optional[int] = None,
     max_workers: int = 8,
 ) -> dict[str, Path]:
-    """Download datasets and write train / val / noise manifests.
+    """Download datasets and write train / val / noise / impulse manifests.
 
     Parameters
     ----------
@@ -195,13 +202,14 @@ def prepare_manifests(
 
     Returns
     -------
-    dict with keys ``"train"``, ``"val"``, ``"noise"`` mapped to manifest
-    ``Path`` objects.
+    dict with keys ``"train"``, ``"val"``, ``"noise"``, ``"impulse"``
+    mapped to manifest ``Path`` objects.
     """
     manifests = {
         "train": TRAIN_MANIFEST,
         "val": VAL_MANIFEST,
         "noise": NOISE_MANIFEST,
+        "impulse": IMPULSE_MANIFEST,
     }
 
     # Fast path: if all manifests already exist, skip downloading entirely.
@@ -212,6 +220,7 @@ def prepare_manifests(
     # Ensure directories exist
     AUDIO_CACHE.mkdir(parents=True, exist_ok=True)
     NOISE_CACHE.mkdir(parents=True, exist_ok=True)
+    IMPULSE_CACHE.mkdir(parents=True, exist_ok=True)
 
     # ── ASR dataset ──────────────────────────────────────────────────────
     if not TRAIN_MANIFEST.exists() or not VAL_MANIFEST.exists():
@@ -245,11 +254,23 @@ def prepare_manifests(
         noise_hf = load_dataset(NOISE_ID, split="train")
         logger.info(f"Loaded noise dataset '{NOISE_ID}' — {len(noise_hf)} clips")
 
-        _noise_to_manifest(
+        _audio_dataset_to_manifest(
             noise_hf, NOISE_MANIFEST, NOISE_CACHE,
-            max_workers=max_workers,
+            label="noise", uid_prefix="noise", max_workers=max_workers,
         )
     else:
         logger.info(f"{NOISE_MANIFEST.name} already exists — skipping")
+
+    # ── Impulse dataset ──────────────────────────────────────────────────
+    if not IMPULSE_MANIFEST.exists():
+        impulse_hf = load_dataset(IMPULSE_ID, split="train")
+        logger.info(f"Loaded impulse dataset '{IMPULSE_ID}' — {len(impulse_hf)} clips")
+
+        _audio_dataset_to_manifest(
+            impulse_hf, IMPULSE_MANIFEST, IMPULSE_CACHE,
+            label="impulse", uid_prefix="impulse", max_workers=max_workers,
+        )
+    else:
+        logger.info(f"{IMPULSE_MANIFEST.name} already exists — skipping")
 
     return manifests
