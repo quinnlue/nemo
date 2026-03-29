@@ -83,6 +83,19 @@ model:
         stochastic_depth: 0.0  # float, setting to > 0 will enable stochastic depth for each adapter block.
         l2_lambda: 0.0  # float, setting to > 0 will enable l2 norm auxiliary loss for each adapter's output.
 
+    # LoRA Adapter (https://arxiv.org/abs/2106.09685)
+    lora:
+      _target_: asr_benchmark.lora_adapter.LoRAAdapter
+      in_features: ???  # Must match encoder block dimension (e.g. model.encoder.d_model).
+      rank: 16  # Rank of the low-rank decomposition.  4–32 is typical.
+      alpha: null  # Scaling factor; defaults to rank (scale = 1).
+      dropout: 0.0
+
+      adapter_strategy:
+        _target_: nemo.core.classes.mixins.adapter_mixin_strategies.ResidualAddAdapterStrategy
+        stochastic_depth: 0.0
+        l2_lambda: 0.0
+
     # Tiny-Attention Adapter (https://arxiv.org/abs/2211.01979)
     # NOTE: Only supported for Attention based encoders. Make sure to pass `adapter_module_name` as "encoder"
     tiny_attn:

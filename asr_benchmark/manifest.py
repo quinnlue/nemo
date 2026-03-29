@@ -13,8 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
-import soundfile as sf
-from datasets import load_dataset
+from datasets import Audio, load_dataset
 from loguru import logger
 from tqdm.auto import tqdm
 
@@ -41,8 +40,27 @@ IMPULSE_MANIFEST = MANIFEST_DIR / "impulse_manifest.jsonl"
 
 def _write_wav(wav_path_str: str, array, sr: int) -> str:
     """Write a single wav file.  Runs in a worker process."""
+    import soundfile as sf
     sf.write(wav_path_str, array, sr)
     return wav_path_str
+
+
+def _decode_and_write_wav(wav_path_str: str, audio_bytes: bytes, decode_format: str) -> str:
+    """Decode raw audio bytes and write to wav.  Runs in a worker process."""
+    import io
+    import soundfile as sf
+    import numpy as np
+
+    with io.BytesIO(audio_bytes) as buf:
+        array, sr = sf.read(buf)
+    # Downmix to mono if multi-channel (avoids dimensionality mismatch in
+    # augmentation ops like impulse-response convolution).
+    if array.ndim > 1:
+        array = np.mean(array, axis=1)
+    sf.write(wav_path_str, array, sr)
+    # Return duration so we don't need to re-open the file
+    duration = len(array) / sr
+    return wav_path_str, duration
 
 
 def _hf_split_to_manifest(
@@ -123,13 +141,9 @@ def _audio_dataset_to_manifest(
     uid_prefix: str = "clip",
     max_workers: int = 8,
 ) -> int:
-    """Convert a HuggingFace audio-only dataset to a NeMo-format manifest.
+    # Disable HF decoding — get raw bytes instead so segfaults stay in workers
+    dataset = dataset.cast_column(audio_column, Audio(decode=False))
 
-    Each row is expected to have an *audio_column* column (dict with
-    ``array`` and ``sampling_rate``).  The manifest JSONL contains
-    ``audio_filepath``, ``duration``, and ``offset`` (always 0.0) as
-    required by NeMo's perturbation augmentors (noise / impulse).
-    """
     records: list[dict] = []
     futures: dict = {}
     errors = 0
@@ -139,38 +153,48 @@ def _audio_dataset_to_manifest(
             uid = f"{uid_prefix}_{idx}"
             wav_path = cache_dir / f"{uid}.wav"
 
-            try:
-                array = row[audio_column]["array"]
-                sr = row[audio_column]["sampling_rate"]
-            except (RuntimeError, Exception) as e:
-                errors += 1
-                logger.warning(f"Skipping {uid} (decode): {e}")
+            if wav_path.exists():
+                # Already written — read duration from file header
+                import soundfile as sf
+                try:
+                    info = sf.info(str(wav_path))
+                    records.append({
+                        "audio_filepath": str(wav_path),
+                        "duration": info.frames / info.samplerate,
+                        "offset": 0.0,
+                    })
+                except Exception as e:
+                    errors += 1
+                    logger.warning(f"Skipping {uid} (re-read): {e}")
                 continue
 
-            duration = len(array) / sr
+            try:
+                audio_bytes = row[audio_column]["bytes"]
+                if audio_bytes is None:
+                    # Some HF datasets store path instead of bytes
+                    audio_path = row[audio_column]["path"]
+                    with open(audio_path, "rb") as f:
+                        audio_bytes = f.read()
+            except Exception as e:
+                errors += 1
+                logger.warning(f"Skipping {uid} (read bytes): {e}")
+                continue
 
-            if not wav_path.exists():
-                fut = pool.submit(_write_wav, str(wav_path), array, sr)
-                futures[fut] = (uid, wav_path, duration)
-            else:
-                records.append({
-                    "audio_filepath": str(wav_path),
-                    "duration": duration,
-                    "offset": 0.0,
-                })
+            fut = pool.submit(_decode_and_write_wav, str(wav_path), audio_bytes, "")
+            futures[fut] = (uid, wav_path)
 
         for fut in tqdm(as_completed(futures), total=len(futures), desc=f"{label} (write)"):
-            uid, wav_path, duration = futures[fut]
+            uid, wav_path = futures[fut]
             try:
-                fut.result()
+                path_out, duration = fut.result()
                 records.append({
-                    "audio_filepath": str(wav_path),
+                    "audio_filepath": path_out,
                     "duration": duration,
                     "offset": 0.0,
                 })
             except Exception as e:
                 errors += 1
-                logger.warning(f"Skipping {uid} (write): {e}")
+                logger.warning(f"Skipping {uid} (worker): {e}")
 
     logger.info(
         f"Wrote {len(records)} {label} entries to {manifest_path.name} "
