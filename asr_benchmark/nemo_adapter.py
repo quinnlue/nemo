@@ -33,12 +33,12 @@ def update_model_cfg(original_cfg, new_cfg):
     """Merge a user-supplied dataset config into the model's default config.
 
     Keys in *new_cfg* that are on the whitelist (``num_workers``,
-    ``pin_memory``, ``batch_size``, ``use_lhotse``, ``channel_selector``)
-    are always injected.  Other keys that don't already exist in
-    *original_cfg* are silently dropped.
+    ``pin_memory``, ``batch_size``, ``use_lhotse``, ``channel_selector``,
+    ``augmentor``) are always injected. Other keys that don't already
+    exist in *original_cfg* are silently dropped.
     """
     with open_dict(original_cfg), open_dict(new_cfg):
-        whitelist_keys = ['num_workers', 'pin_memory', 'batch_size', 'use_lhotse', 'channel_selector']
+        whitelist_keys = ['num_workers', 'pin_memory', 'batch_size', 'use_lhotse', 'channel_selector', 'augmentor']
         for wkey in whitelist_keys:
             if wkey in new_cfg:
                 original_cfg[wkey] = new_cfg[wkey]
