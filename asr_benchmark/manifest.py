@@ -298,3 +298,7 @@ def prepare_manifests(
         logger.info(f"{IMPULSE_MANIFEST.name} already exists — skipping")
 
     return manifests
+
+
+if __name__ == "__main__":
+    prepare_manifests()
